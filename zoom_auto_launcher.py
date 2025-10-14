@@ -15,6 +15,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
+# Opcional para la app de Zoom (atajos a nivel del SO)
+try:
+    import pyautogui  # pip install pyautogui
+except Exception:
+    pyautogui = None
+
 
 # =====================================
 # CONFIGURACIÓN
@@ -39,25 +48,25 @@ TZ = ZoneInfo("America/Bogota")
 reuniones = [
     {
         "nombre": "Prueba 1",
-        "url": "https://renata.zoom.us/j/86426544795",
+        "url": "https://renata.zoom.us/j/85999338811",
         "modo": "zoom_app",
         "programacion": {
             "tipo": "semanal",
-            "dias": ["lun", "jue", "vie"],   # lunes y jueves
-            "hora": "15:30"           # 5:00 PM (formato 24h, hora local)
+            "dias": ["mar", "jue", "vie"],   # martes, jueves y viernes
+            "hora": "11:45"           # 9:30 AM (formato 24h, hora local)
         },
         "abrir_antes_min": 20
     },
     {
-        "nombre": "ILEX G7 - Life and Discovery 2025",
-        "url": "https://renata.zoom.us/w/81139053579?tk=...",
+        "nombre": "Prueba 1",
+        "url": "https://renata.zoom.us/j/85999338811",
         "modo": "navegador_auto",
         "incognito": False,
         "nombre_usuario": "Regencia de Farmacia UTP- Univirtual",
         "programacion": {
             "tipo": "semanal",
-            "dias": ["lun", "jue"],   # mismo horario recurrente
-            "hora": "17:00"
+            "dias": ["mar", "jue"],   # mismo horario recurrente
+            "hora": "11:45"
         },
         "abrir_antes_min": 20
     }
@@ -189,6 +198,184 @@ def login_zoom_via_google(driver, wait, tenant_base="https://zoom.us"):
     except Exception as e:
         print(f"   ❌ Error en login via Google: {e}")
 
+
+from urllib.parse import quote
+
+def get_webclient_url(meeting_url: str, display_name: str) -> str:
+    """
+    Devuelve SIEMPRE la URL válida del Web Client.
+    - En renata.zoom.us: /wc/join/<ID>?prefer=1&uname=...
+    - En zoom.us (NO Renata): /wc/host/<ID>?prefer=1  (si quieres entrar como host)
+      (aquí preferimos join para compatibilidad; puedes cambiarlo si usas zoom.us)
+    """
+    base = "https://renata.zoom.us" if "renata.zoom.us" in meeting_url else "https://zoom.us"
+
+    # extrae el ID de la reunión de forma robusta
+    mid = extract_meeting_id(meeting_url)
+    if not mid:
+        # último intento: tomar los dígitos de cualquier parte
+        import re
+        m = re.search(r"(?<!\d)(\d{9,12})(?!\d)", meeting_url)
+        mid = m.group(1) if m else ""
+
+    if not mid:
+        return meeting_url  # fallback
+
+    if "renata.zoom.us" in base:
+        # 🔴 NUNCA /wc/host en Renata: no existe y da 404.
+        return f"{base}/wc/join/{mid}?prefer=1&uname={quote(display_name)}"
+    else:
+        # Si algún día usas zoom.us “normal”, podrías usar host:
+        # return f"{base}/wc/host/{mid}?prefer=1"
+        return f"{base}/wc/join/{mid}?prefer=1&uname={quote(display_name)}"
+    
+
+def try_host_sign_in_on_wc(driver, wait, tenant_base):
+    """
+    En la pantalla del Web Client, pulsa 'Inicio de sesión del anfitrión'
+    si existe; hace SSO y vuelve al Web Client.
+    """
+    try:
+        link_selectors = [
+            "//a[contains(translate(text(),'HOST','host'),'host')]",
+            "//a[contains(translate(text(),'INICIO DE SESIÓN DEL ANFITRIÓN','inicio de sesión del anfitrión'),'inicio de sesión del anfitrión')]",
+            "//a[contains(.,'Inicio de sesión del anfitrión')]",
+            "//a[contains(.,'Host sign in')]",
+            "//a[contains(@href,'signin')]",
+        ]
+        for sx in link_selectors:
+            try:
+                a = WebDriverWait(driver, 4).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                driver.execute_script("arguments[0].scrollIntoView(true);", a)
+                time.sleep(0.2)
+                driver.execute_script("arguments[0].click();", a)
+                time.sleep(2)
+                # si nos manda a login → SSO
+                if "signin" in driver.current_url or "accounts.google.com" in driver.current_url:
+                    login_zoom_via_google(driver, wait, tenant_base=tenant_base)
+                return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def pause_recording_in_webclient(driver, wait, timeout=20):
+    """
+    Pausa la grabación en el Web Client. Primero intenta click en el botón
+    'Pausar grabación/ Pause recording'. Si no lo encuentra, envía Alt+P como fallback.
+    Requiere permisos de host/co-host.
+    """
+    try:
+        # a) Si el cliente está en un iframe, intenta enfocarlo (heurística)
+        try:
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            for f in iframes:
+                src = f.get_attribute("src") or ""
+                if "/wc/" in src or "webclient" in (f.get_attribute("id") or ""):
+                    driver.switch_to.frame(f)
+                    break
+        except Exception:
+            pass
+
+        # b) Espera que la UI cargue algo común (micrófono)
+        try:
+            wait.until(EC.presence_of_element_located((
+                By.XPATH,
+                "//button[contains(@aria-label,'Mic') or contains(@aria-label,'Micrófono') or contains(@aria-label,'Mute')]"
+            )))
+        except Exception:
+            pass
+
+        # c) Intenta encontrar el botón de pausa
+        pause_selectors = [
+            "//button[contains(@aria-label,'Pausar grabación')]",
+            "//button[contains(@aria-label,'Pause recording')]",
+            "//button[contains(.,'Pausar grabación')]",
+            "//button[contains(.,'Pause recording')]",
+            "//*[self::button or self::div][contains(.,'Pausar grabación') or contains(.,'Pause recording')]",
+        ]
+
+        def open_more_menu_if_needed():
+            for sx in ["//button[contains(@aria-label,'Más') or contains(@aria-label,'More')]",
+                       "//button[contains(.,'Más') or contains(.,'More')]"]:
+                try:
+                    b = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                    driver.execute_script("arguments[0].click();", b)
+                    time.sleep(0.4)
+                    return True
+                except Exception:
+                    continue
+            return False
+
+        end = time.time() + timeout
+        while time.time() < end:
+            for sx in pause_selectors:
+                try:
+                    btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                    driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                    time.sleep(0.1)
+                    driver.execute_script("arguments[0].click();", btn)
+                    print("   ⏸️ Grabación pausada (click en botón).")
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+                    return True
+                except Exception:
+                    continue
+            open_more_menu_if_needed()
+
+        # d) Fallback: enviar ALT+P al navegador
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        try:
+            ActionChains(driver).key_down(Keys.ALT).send_keys('p').key_up(Keys.ALT).perform()
+            print("   ⏸️ Grabación pausada (fallback ALT+P).")
+            return True
+        except Exception as e:
+            print(f"   ⚠️ No pude enviar ALT+P en Web Client: {e}")
+            return False
+
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+
+def pause_recording_in_zoom_app(delay_seconds=4):
+    """
+    Envía el atajo global de Zoom para Pausar/Reanudar grabación en la app nativa.
+    Windows/Linux: Alt+P
+    macOS: Cmd+Shift+P
+    Requiere que la ventana de Zoom esté al frente (abrir por zoommtg:// ya la enfoca).
+    """
+    try:
+        time.sleep(delay_seconds)  # dar tiempo a que cargue la reunión
+        system = platform.system().lower()
+        if pyautogui is None:
+            print("   ℹ️ pyautogui no está instalado; no puedo enviar el atajo a la app.")
+            return False
+
+        if system == "darwin":  # macOS
+            pyautogui.hotkey("command", "shift", "p")
+        else:  # Windows / Linux
+            pyautogui.hotkey("alt", "p")
+
+        print("   ⏸️ Atajo enviado a la app de Zoom (pausar).")
+        return True
+    except Exception as e:
+        print(f"   ⚠️ No pude enviar atajo a la app de Zoom: {e}")
+        return False
+
+
+
+
+
 # =====================================
 # FUNCIONES PRINCIPALES (APERTURA)
 # =====================================
@@ -203,12 +390,16 @@ def abrir_zoom_app(url):
 
     try:
         if sistema == "Windows":
-            os.startfile(zoom_url)  # type: ignore
+            os.startfile(zoom_url)
         elif sistema == "Linux":
             subprocess.Popen(["xdg-open", zoom_url])
         elif sistema == "Darwin":
             subprocess.Popen(["open", zoom_url])
         print("✅ App de Zoom abierta")
+
+        # 👉 Pausar automáticamente la grabación en la app
+        pause_recording_in_zoom_app(delay_seconds=6)  # sube/baja este delay si la app tarda en cargar
+
         return True
     except Exception as e:
         print(f"❌ Error al abrir Zoom app: {e}")
@@ -216,26 +407,26 @@ def abrir_zoom_app(url):
 
 def abrir_navegador_automatico(url, nombre_usuario, incognito=False):
     """
-    Abre Zoom en el navegador y entra como anfitrión (SSO con Google).
-    Si post-SSO te deja en /profile, redirige al Web Client join automáticamente.
+    Abre Zoom en el navegador directamente en el Web Client (Renata),
+    evitando el launcher (/j/<id>) y realizando inicio de sesión del anfitrión
+    si la sesión está guardada o se usa SSO de Google.
     """
     print(f"   🤖 Iniciando navegador automatizado...")
     print(f"   👤 Usuario: {nombre_usuario}")
 
-    # Configurar Chrome
+    # ==============================
+    # Configuración de Chrome
+    # ==============================
     chrome_options = Options()
-
     if incognito:
         chrome_options.add_argument("--incognito")
         print("   🕶️  Modo incógnito activado")
 
-    # PERFIL PERSISTENTE (guardar cookies/sesión)
     if GUARDAR_SESION and not incognito:
         os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
         chrome_options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
         chrome_options.add_argument("--profile-directory=Default")
 
-    # Opciones útiles para Linux/CI
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -243,11 +434,7 @@ def abrir_navegador_automatico(url, nombre_usuario, incognito=False):
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
-
-    # Suprimir logs
     chrome_options.add_argument("--log-level=3")
-
-    # Permisos: auto-permitir mic/cámara para Zoom
     chrome_options.add_experimental_option("prefs", {
         "profile.default_content_setting_values.media_stream_mic": 1,
         "profile.default_content_setting_values.media_stream_camera": 1,
@@ -259,77 +446,147 @@ def abrir_navegador_automatico(url, nombre_usuario, incognito=False):
 
     driver = None
     try:
-        # Iniciar el navegador con ChromeDriverManager
+        # ==============================
+        # Iniciar ChromeDriver
+        # ==============================
         print("   ⏳ Descargando/verificando ChromeDriver...")
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         wait = WebDriverWait(driver, 15)
         print("   ✅ Navegador iniciado")
 
-        # Abrir la URL de la reunión
-        driver.get(url)
-        print("   🌐 Página cargada")
+        # ==============================
+        # Construir URL Web Client válida
+        # ==============================
+        def get_webclient_url(meeting_url, display_name):
+            from urllib.parse import quote
+            base = "https://renata.zoom.us" if "renata.zoom.us" in meeting_url else "https://zoom.us"
+            meeting_id = extract_meeting_id(meeting_url)
+            if not meeting_id:
+                import re
+                m = re.search(r"(?<!\d)(\d{9,12})(?!\d)", meeting_url)
+                meeting_id = m.group(1) if m else ""
+            return f"{base}/wc/join/{meeting_id}?prefer=1&uname={quote(display_name)}"
+
+        wc_url = get_webclient_url(url, nombre_usuario)
+        print(f"   🌐 Abriendo Web Client: {wc_url}")
+        driver.get(wc_url)
         time.sleep(2)
 
-        # Forzar SSO si es primera vez o nos manda a login
+        # ==============================
+        # Si cayó en /j/<id> → buscar "Unirse desde su navegador"
+        # ==============================
+        if ("/j/" in driver.current_url or "/launch" in driver.current_url) and "/wc/" not in driver.current_url:
+            try:
+                join_from_browser = [
+                    "//a[contains(.,'Unirse desde su navegador')]",
+                    "//a[contains(.,'Únase desde su navegador')]",
+                    "//a[contains(.,'Join from your browser')]",
+                ]
+                for sx in join_from_browser:
+                    try:
+                        a = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                        driver.execute_script("arguments[0].click();", a)
+                        print("   🔁 Redirigido al Web Client correctamente.")
+                        time.sleep(2)
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # ==============================
+        # Si no hay sesión → hacer SSO Google
+        # ==============================
         if PRIMERA_VEZ or "signin" in driver.current_url or "accounts.google.com" in driver.current_url:
-            print("   ℹ️ Realizando SSO con Google (primera vez o sesión inválida)...")
+            print("   🔑 Realizando inicio de sesión (SSO con Google)...")
             tenant_base = "https://renata.zoom.us" if "renata.zoom.us" in url else "https://zoom.us"
             login_zoom_via_google(driver, wait, tenant_base=tenant_base)
+            driver.get(wc_url)
             time.sleep(2)
 
-        # Estado actual
+        # ==============================
+        # Si queda en /profile → volver al Web Client
+        # ==============================
+        if "/profile" in driver.current_url:
+            driver.get(wc_url)
+            time.sleep(2)
+
+        # ==============================
+        # Intentar “Inicio de sesión del anfitrión”
+        # ==============================
+        def try_host_sign_in_on_wc(driver, wait, tenant_base):
+            try:
+                link_selectors = [
+                    "//a[contains(.,'Inicio de sesión del anfitrión')]",
+                    "//a[contains(.,'Host sign in')]",
+                    "//a[contains(@href,'signin')]"
+                ]
+                for sx in link_selectors:
+                    try:
+                        a = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                        driver.execute_script("arguments[0].click();", a)
+                        time.sleep(3)
+                        if "signin" in driver.current_url or "accounts.google.com" in driver.current_url:
+                            login_zoom_via_google(driver, wait, tenant_base=tenant_base)
+                            driver.get(wc_url)
+                            time.sleep(2)
+                        return True
+                    except Exception:
+                        continue
+                return False
+            except Exception:
+                return False
+
+        tenant_base = "https://renata.zoom.us" if "renata.zoom.us" in url else "https://zoom.us"
+        try_host_sign_in_on_wc(driver, wait, tenant_base)
+
+        # ==============================
+        # Autocompletar y pulsar "Entrar" si está la pre-unión
+        # ==============================
         try:
-            cur = driver.current_url
-        except Exception:
-            cur = ""
-
-        host_wc_url = build_webclient_url(url, as_host=True, display_name=TU_NOMBRE)
-        join_wc_url = build_webclient_url(url, as_host=False, display_name=TU_NOMBRE)
-
-        # Si estás en /profile, o en un lugar que no sea la sala, fuerza join
-        if "/profile" in cur or ("/wc/" not in cur and "/j/" not in cur and "/w/" not in cur):
-            driver.get(join_wc_url)
-            time.sleep(3)
-
-        # Intentar “Start/Join” (en web client)
-        try:
-            print("   ⏳ Intentando entrar (Web Client)...")
             posibles_botones = [
-                "//button[contains(translate(text(), 'INICIAR', 'iniciar'),'iniciar')]",
-                "//button[contains(translate(text(), 'JOIN', 'join'),'join')]",
-                "//button[contains(translate(text(), 'UNIRSE', 'unirse'),'unirse')]",
                 "//button[@id='joinBtn']",
-                "//button[contains(@class, 'preview-join-button')]",
-                "//button[contains(@aria-label, 'join')]"
+                "//button[contains(translate(text(),'ENTRAR','entrar'),'entrar')]",
+                "//button[contains(translate(text(),'JOIN','join'),'join')]",
+                "//button[contains(translate(text(),'UNIRSE','unirse'),'unirse')]",
+                "//button[contains(@class,'preview-join-button')]",
             ]
+            try:
+                name_input = driver.find_element(By.XPATH, "//input[@id='inputname' or @name='uname']")
+                if name_input.get_attribute("value").strip() == "":
+                    name_input.clear()
+                    name_input.send_keys(nombre_usuario)
+                    time.sleep(0.3)
+            except Exception:
+                pass
+
             for sx in posibles_botones:
                 try:
-                    btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, sx)))
+                    btn = WebDriverWait(driver, 4).until(EC.element_to_be_clickable((By.XPATH, sx)))
                     driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-                    time.sleep(0.3)
                     driver.execute_script("arguments[0].click();", btn)
-                    print("   ✅ Botón de unión presionado")
+                    print("   ✅ Botón 'Entrar' presionado.")
                     time.sleep(2)
                     break
                 except Exception:
                     continue
         except Exception as e:
-            print(f"   ℹ️ No se pudo auto-press en WC: {e}")
+            print(f"   ⚠️ Error en pre-unión: {e}")
 
-        # Verificar si entró al Web Client (wc/)
-        try:
-            time.sleep(1.5)
-            current_url = driver.current_url
-            if '/wc/' in current_url:
-                print("   🎉 ¡ÉXITO! Ya estás en la reunión de Zoom (Web Client).")
-            else:
-                print("   ℹ️ Verifica manualmente si entraste a la reunión.")
-                print(f"   URL actual: {current_url[:100]}...")
-        except Exception:
-            pass
+        # ==============================
+        # Confirmar si entró al Web Client y PAUSAR grabación
+        # ==============================
+        cur = driver.current_url
+       # Confirmar si entró al Web Client (y pausar grabación)
+        cur = driver.current_url
+        if '/wc/' in cur:
+            print("   🎉 ¡ÉXITO! Ya estás en la reunión de Zoom (Web Client).")
+            time.sleep(4)  # dar tiempo a que aparezcan los controles
+            pause_recording_in_webclient(driver, wait)
+        else:
+            print(f"   ℹ️ Revisa manualmente, URL actual: {cur}")
 
-        print("   ℹ️  El navegador permanecerá abierto (no cierres la ventana).")
         return True
 
     except Exception as e:
@@ -340,6 +597,9 @@ def abrir_navegador_automatico(url, nombre_usuario, incognito=False):
         except Exception:
             pass
         return False
+
+
+
 
 def abrir_reunion(reunion):
     """Abre una reunión según su configuración."""
