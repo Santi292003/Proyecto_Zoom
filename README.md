@@ -138,11 +138,15 @@ Apertura-de-aulas-autom-ticas-Zoom/
 
 ---
 
-## 🧠 Autor
+## 🧠 Autores
+
+👤 **Juan Pablo González Trejos**
+Ingeniero de Sistemas Univirtual - Universidad Tecnológica de Pereira
+📧 Contacto: [soporteunivirtual@utp.edu.co](soporteunivirtual@utp.edu.co)
 
 👤 **Santiago Ramírez González**
 Practicante Univirtual - Universidad Tecnológica de Pereira
-📧 Contacto: [univirtual_zoom_2@utp.edu.co](mailto:univirtual_zoom_2@utp.edu.co)
+📧 Contacto: [soporteunivirtual@utp.edu.co](soporteunivirtual@utp.edu.co)
 
 ---
 
